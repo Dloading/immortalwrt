@@ -56,7 +56,7 @@ jobs:
         make -j$(nproc) V=s
 
     - name: Upload firmware artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: Phicomm-K3-Firmware
         path: openwrt/bin/targets/bcm53xx/generic/*.trx
