@@ -1,0 +1,62 @@
+name: Build ImmortalWrt for Phicomm K3
+
+on: 
+  workflow_dispatch: # 允许手动触发
+  push: # 当代码有推送时也触发（可选）
+    branches: [ master ]
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-24.10
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Clone ImmortalWrt source
+      run: |
+        git clone --depth=1 ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
+        cd openwrt
+
+    - name: Generate K3 config file
+      run: |
+        cd openwrt
+        cat > .config << EOF
+        CONFIG_TARGET_bcm53xx=y
+        CONFIG_TARGET_bcm53xx_generic=y
+        CONFIG_TARGET_bcm53xx_generic_DEVICE_phicomm_k3=y
+        CONFIG_PACKAGE_luci=y
+        CONFIG_PACKAGE_luci-base=y
+        CONFIG_PACKAGE_luci-compat=y
+        CONFIG_PACKAGE_luci-theme-bootstrap=y
+        EOF
+
+    - name: Update feeds and install
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Load custom configuration
+      run: |
+        cd openwrt
+        make defconfig
+
+    - name: Download packages
+      run: |
+        cd openwrt
+        make -j8 download
+
+    - name: Start building
+      run: |
+        cd openwrt
+        make -j$(nproc) V=s
+
+    - name: Upload firmware artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: Phicomm-K3-Firmware
+        path: openwrt/bin/targets/bcm53xx/generic/*.trx
