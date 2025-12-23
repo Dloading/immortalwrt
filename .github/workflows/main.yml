@@ -2,8 +2,9 @@ name: Build ImmortalWrt for Phicomm K3
 
 on: 
   workflow_dispatch: # 允许手动触发
-  push: # 当代码有推送时也触发（可选）
-    branches: [ master ]
+  schedule:
+    # 每半月触发：每月1号和16号，UTC时间0点（北京时间早上8点）
+    - cron: '0 0 1,16 * *'
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
@@ -13,8 +14,9 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
+    # 修复点1： 使用正确的 checkout 动作拉取本仓库代码
     - name: Checkout repository
-      uses: actions/upload-artifact@v4
+      uses: actions/checkout@v4
 
     - name: Clone ImmortalWrt source
       run: |
@@ -55,8 +57,10 @@ jobs:
         cd openwrt
         make -j$(nproc) V=s
 
+    # 修复点2： 优化上传路径，并仅在编译成功时上传
     - name: Upload firmware artifact
+      if: success()
       uses: actions/upload-artifact@v4
       with:
         name: Phicomm-K3-Firmware
-        path: openwrt/bin/targets/bcm53xx/generic/*.trx
+        path: openwrt/bin/targets/bcm53xx/generic/
