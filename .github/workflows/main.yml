@@ -1,66 +1,114 @@
 name: Build ImmortalWrt for Phicomm K3
 
-on: 
-  workflow_dispatch: # 允许手动触发
+on:
+  workflow_dispatch: {}
   schedule:
-    # 每半月触发：每月1号和16号，UTC时间0点（北京时间早上8点）
+    # 每月 1 日和 16 日 UTC 0 点（北京时间 08:00）
     - cron: '0 0 1,16 * *'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: build-immortalwrt-k3-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
-  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  UPSTREAM_REPO: immortalwrt/immortalwrt
   REPO_BRANCH: openwrt-24.10
+  OPENWRT_DIR: openwrt
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
     steps:
-    # 修复点1： 使用正确的 checkout 动作拉取本仓库代码
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout this repository (workflow & scripts)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-    - name: Clone ImmortalWrt source
-      run: |
-        git clone --depth=1 ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
-        cd openwrt
+      - name: Checkout ImmortalWrt source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ env.REPO_BRANCH }}
+          path: ${{ env.OPENWRT_DIR }}
+          fetch-depth: 1
 
-    - name: Generate K3 config file
-      run: |
-        cd openwrt
-        cat > .config << EOF
-        CONFIG_TARGET_bcm53xx=y
-        CONFIG_TARGET_bcm53xx_generic=y
-        CONFIG_TARGET_bcm53xx_generic_DEVICE_phicomm_k3=y
-        CONFIG_PACKAGE_luci=y
-        CONFIG_PACKAGE_luci-base=y
-        CONFIG_PACKAGE_luci-compat=y
-        CONFIG_PACKAGE_luci-theme-bootstrap=y
-        EOF
+      - name: Cache openwrt download directory (dl)
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OPENWRT_DIR }}/dl
+          key: ${{ runner.os }}-openwrt-dl-${{ env.REPO_BRANCH }}-${{ hashFiles('openwrt/feeds.conf*') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-dl-${{ env.REPO_BRANCH }}-
+            ${{ runner.os }}-openwrt-dl-
 
-    - name: Update feeds and install
-      run: |
-        cd openwrt
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+      - name: Update feeds and install
+        run: |
+          cd ${{ env.OPENWRT_DIR }}
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-    - name: Load custom configuration
-      run: |
-        cd openwrt
-        make defconfig
+      - name: Apply repository config (config/k3.config)
+        run: |
+          # 工作区 root 有本仓库内容，openwrt 源码在 $OPENWRT_DIR 下
+          if [ -f config/k3.config ]; then
+            echo "Found config/k3.config in repository, applying..."
+          else
+            echo "ERROR: config/k3.config not found in repository root." >&2
+            exit 1
+          fi
 
-    - name: Download packages
-      run: |
-        cd openwrt
-        make -j8 download
+          cd ${{ env.OPENWRT_DIR }}
 
-    - name: Start building
-      run: |
-        cd openwrt
-        make -j$(nproc) V=s
+          # 准备基础配置（若没有 .config，会用 defconfig 生成基本结构）
+          make defconfig
 
-    # 修复点2： 优化上传路径，并仅在编译成功时上传
-    - name: Upload firmware artifact
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: Phicomm-K3-Firmware
-        path: openwrt/bin/targets/bcm53xx/generic/
+          # 如果 OpenWrt 源码包含 merge_config.sh（通常有），优先用它合并片段：
+          if [ -x ./scripts/merge_config.sh ]; then
+            echo "Merging config fragment using scripts/merge_config.sh ..."
+            # 使用相对路径把仓库中的片段合并进当前 .config
+            ./scripts/merge_config.sh ../config/k3.config
+            # 使用 olddefconfig 保留已选择的交互设置，只为新选项采用默认
+            make olddefconfig
+          else
+            # 若没有 merge 脚本，则直接覆盖 .config 并运行 defconfig
+            echo "merge_config.sh not found, fallback to direct overwrite .config"
+            cp ../config/k3.config .config
+            make defconfig
+          fi
+
+      - name: Download packages
+        run: |
+          cd ${{ env.OPENWRT_DIR }}
+          make -j8 download
+
+      - name: Build (capture log)
+        env:
+          MAKEFLAGS: -j${{ runner.available_processors }}
+        run: |
+          cd ${{ env.OPENWRT_DIR }}
+          set -o pipefail
+          # 将输出写入 build_log.txt 以便排查
+          make V=s 2>&1 | tee build_log.txt
+          rc=${PIPESTATUS[0]}
+          echo "MAKE_EXIT_CODE=$rc" >> build_log.txt
+          exit $rc
+        timeout-minutes: 300
+
+      - name: Upload firmware artifact (on success)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Phicomm-K3-Firmware
+          path: ${{ env.OPENWRT_DIR }}/bin/targets/bcm53xx/generic/**
+
+      - name: Upload build log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ env.OPENWRT_DIR }}/build_log.txt
