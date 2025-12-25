@@ -54,7 +54,6 @@ jobs:
 
       - name: Apply repository config (config/k3.config)
         run: |
-          # 工作区 root 有本仓库内容，openwrt 源码在 $OPENWRT_DIR 下
           if [ -f config/k3.config ]; then
             echo "Found config/k3.config in repository, applying..."
           else
@@ -63,19 +62,13 @@ jobs:
           fi
 
           cd ${{ env.OPENWRT_DIR }}
-
-          # 准备基础配置（若没有 .config，会用 defconfig 生成基本结构）
           make defconfig
 
-          # 如果 OpenWrt 源码包含 merge_config.sh（通常有），优先用它合并片段：
           if [ -x ./scripts/merge_config.sh ]; then
             echo "Merging config fragment using scripts/merge_config.sh ..."
-            # 使用相对路径把仓库中的片段合并进当前 .config
             ./scripts/merge_config.sh ../config/k3.config
-            # 使用 olddefconfig 保留已选择的交互设置，只为新选项采用默认
             make olddefconfig
           else
-            # 若没有 merge 脚本，则直接覆盖 .config 并运行 defconfig
             echo "merge_config.sh not found, fallback to direct overwrite .config"
             cp ../config/k3.config .config
             make defconfig
@@ -86,14 +79,12 @@ jobs:
           cd ${{ env.OPENWRT_DIR }}
           make -j8 download
 
-      - name: Build (capture log)
-        env:
-          MAKEFLAGS: -j${{ runner.available_processors }}
+      - name: Build (capture log) — reduce parallelism to avoid OOM
         run: |
           cd ${{ env.OPENWRT_DIR }}
           set -o pipefail
-          # 将输出写入 build_log.txt 以便排查
-          make V=s 2>&1 | tee build_log.txt
+          # 降低并行度为 2，减少内存/CPU 压力
+          make -j2 V=s 2>&1 | tee build_log.txt
           rc=${PIPESTATUS[0]}
           echo "MAKE_EXIT_CODE=$rc" >> build_log.txt
           exit $rc
