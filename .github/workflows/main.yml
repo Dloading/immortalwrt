@@ -1,4 +1,4 @@
-name: Build ImmortalWrt for Phicomm K3
+name: Build ImmortalWrt for Phicomm K3 (conservative)
 
 on:
   workflow_dispatch: {}
@@ -17,17 +17,30 @@ env:
   UPSTREAM_REPO: immortalwrt/immortalwrt
   REPO_BRANCH: openwrt-24.10
   OPENWRT_DIR: openwrt
+  ARTIFACT_DIR: artifacts
+  MAKE_JOBS: '1'              # 把并行度降到 1（最保守）
+  DOWNLOAD_JOBS: '2'          # 下载并行度（相对小一些）
+  CLEAN_DL: 'false'           # 是否在构建前删除 openwrt/dl（true = 删除，可能会重新下载大量数据）
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    timeout-minutes: 720
 
     steps:
       - name: Checkout this repository (workflow & scripts)
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: Runner disk info (pre-check)
+        run: |
+          echo "=== df -h ==="
+          df -h || true
+          echo "=== Top 20 biggest root entries ==="
+          sudo du -sh /* 2>/dev/null | sort -h | tail -n 20 || true
+          echo "=== Workspace usage ==="
+          du -sh $GITHUB_WORKSPACE || true
 
       - name: Checkout ImmortalWrt source
         uses: actions/checkout@v4
@@ -37,11 +50,31 @@ jobs:
           path: ${{ env.OPENWRT_DIR }}
           fetch-depth: 1
 
+      - name: Pre-build disk cleanup (safe)
+        run: |
+          set -e
+          echo "Cleaning runner temp and toolcache to free space..."
+          sudo rm -rf $RUNNER_TEMP/* || true
+          sudo rm -rf $RUNNER_TOOL_CACHE/* || true
+          echo "Removing previous build_dir and staging_dir (if any)..."
+          rm -rf ./${{ env.OPENWRT_DIR }}/build_dir/* || true
+          rm -rf ./${{ env.OPENWRT_DIR }}/staging_dir/* || true
+
+          if [ "${{ env.CLEAN_DL }}" = "true" ]; then
+            echo "CLEAN_DL=true -> removing openwrt/dl (will re-download dependencies)"
+            rm -rf ./${{ env.OPENWRT_DIR }}/dl || true
+          else
+            echo "CLEAN_DL=false -> keeping openwrt/dl (use cache if available)"
+          fi
+
+          echo "Disk after cleanup:"
+          df -h || true
+
       - name: Cache openwrt download directory (dl)
         uses: actions/cache@v4
         with:
           path: ${{ env.OPENWRT_DIR }}/dl
-          key: ${{ runner.os }}-openwrt-dl-${{ env.REPO_BRANCH }}-${{ hashFiles('openwrt/feeds.conf*') }}
+          key: ${{ runner.os }}-openwrt-dl-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/feeds.conf*', env.OPENWRT_DIR)) }}
           restore-keys: |
             ${{ runner.os }}-openwrt-dl-${{ env.REPO_BRANCH }}-
             ${{ runner.os }}-openwrt-dl-
@@ -77,25 +110,46 @@ jobs:
       - name: Download packages
         run: |
           cd ${{ env.OPENWRT_DIR }}
-          make -j8 download
+          # 较低并行度，减少瞬时磁盘/网络压力
+          make -j${{ env.DOWNLOAD_JOBS }} download
 
-      - name: Build (capture log) — reduce parallelism to avoid OOM
+      - name: Build (capture log) — very conservative parallelism
         run: |
           cd ${{ env.OPENWRT_DIR }}
           set -o pipefail
-          # 降低并行度为 2，减少内存/CPU 压力
-          make -j2 V=s 2>&1 | tee build_log.txt
+          echo "Running make with -j${{ env.MAKE_JOBS }} (conservative)"
+          make -j${{ env.MAKE_JOBS }} V=s 2>&1 | tee build_log.txt
           rc=${PIPESTATUS[0]}
           echo "MAKE_EXIT_CODE=$rc" >> build_log.txt
           exit $rc
-        timeout-minutes: 300
+        timeout-minutes: 600
+
+      - name: Post-build cleanup (free large intermediates before packaging)
+        if: success()
+        run: |
+          echo "Removing build_dir and staging_dir to free space before packaging artifacts..."
+          rm -rf ./${{ env.OPENWRT_DIR }}/build_dir || true
+          rm -rf ./${{ env.OPENWRT_DIR }}/staging_dir || true
+          df -h || true
+
+      - name: Package final firmware (compress only target artifacts)
+        if: success()
+        run: |
+          mkdir -p ${{ env.ARTIFACT_DIR }}
+          if [ -d "${{ env.OPENWRT_DIR }}/bin/targets/bcm53xx/generic" ]; then
+            cp -a ${{ env.OPENWRT_DIR }}/bin/targets/bcm53xx/generic ${{ env.ARTIFACT_DIR }}/ || true
+          else
+            echo "Warning: target firmware dir not found." >&2
+          fi
+          tar -C ${{ env.ARTIFACT_DIR }} -czf ${{ env.ARTIFACT_DIR }}/firmware-bcm53xx-generic.tar.gz .
+          ls -lh ${{ env.ARTIFACT_DIR }} || true
 
       - name: Upload firmware artifact (on success)
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Phicomm-K3-Firmware
-          path: ${{ env.OPENWRT_DIR }}/bin/targets/bcm53xx/generic/**
+          path: ${{ env.ARTIFACT_DIR }}/firmware-bcm53xx-generic.tar.gz
 
       - name: Upload build log (always)
         if: always()
@@ -103,3 +157,11 @@ jobs:
         with:
           name: build-log
           path: ${{ env.OPENWRT_DIR }}/build_log.txt
+
+      - name: Runner disk info (post-check)
+        if: always()
+        run: |
+          echo "=== Post-build df -h ==="
+          df -h || true
+          echo "=== Workspace du summary ==="
+          du -sh $GITHUB_WORKSPACE || true
